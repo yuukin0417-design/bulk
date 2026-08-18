@@ -78,6 +78,19 @@ canvas{width:100%;display:block}
 .setrow span{font-size:11px;color:var(--dim);width:26px;flex-shrink:0}
 .setrow input{padding:9px 10px}
 .hint{font-size:11px;color:var(--dim2);margin-top:6px;line-height:1.45}
+.frow{display:flex;align-items:center;gap:8px;padding:10px 2px;border-bottom:1px solid var(--line);cursor:pointer}
+.frow:last-child{border-bottom:none}
+.frow:active{background:var(--card2)}
+.fname{font-size:13px;line-height:1.35;font-weight:600}
+.fmeta{font-size:11px;color:var(--dim);margin-top:2px;font-variant-numeric:tabular-nums}
+.farrow{color:var(--dim2);font-size:18px;flex-shrink:0;line-height:1}
+.fcalc{background:var(--card2);border-radius:10px;padding:11px 12px;margin-top:11px;
+  font-size:13px;font-variant-numeric:tabular-nums;color:var(--dim)}
+.fcalc b{font-size:19px;color:var(--fg);font-weight:700}
+.fcalc span b{font-size:14px}
+.datebar{background:var(--card2);border-radius:11px;padding:10px 11px 8px;margin-top:11px}
+.datebar .pill{margin:0 4px 0 0;padding:6px 12px}
+.datebar .hint{margin-top:7px}
 .pill{display:inline-block;padding:6px 11px;border-radius:99px;background:var(--card2);
   border:1px solid var(--line);font-size:12px;margin:0 5px 5px 0;cursor:pointer}
 .pill.on{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:700}
@@ -139,10 +152,12 @@ const TRAIN_DAYS=[1,2,3,5,6];
 
 /* ============ ストレージ ============ */
 const KEY='bulk_v1';
+const EMPTY={workouts:[],body:[],meals:[],sleep:[],runs:[],foodUse:{},combos:[]};
 let DB=load();
 function load(){
-  try{const r=localStorage.getItem(KEY);if(r)return JSON.parse(r);}catch(e){}
-  return {workouts:[],body:[],meals:[],sleep:[],runs:[]};
+  try{const r=localStorage.getItem(KEY);
+    if(r)return Object.assign({},EMPTY,JSON.parse(r));}catch(e){}
+  return JSON.parse(JSON.stringify(EMPTY));
 }
 function save(){
   try{localStorage.setItem(KEY,JSON.stringify(DB));}
@@ -153,10 +168,17 @@ function toast(m){const t=document.getElementById('toast');t.textContent=m;t.cla
 
 /* ============ ユーティリティ ============ */
 const pad=n=>String(n).padStart(2,'0');
-function today(){const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;}
-function daysAgo(s){return Math.round((new Date(today())-new Date(s))/864e5);}
-function fmtDate(s){const d=new Date(s);return `${d.getMonth()+1}/${d.getDate()}`;}
-function isTrainDay(s){return TRAIN_DAYS.includes(new Date(s+'T00:00').getDay());}
+const DOW=['日','月','火','水','木','金','土'];
+function ymd(d){return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;}
+function today(){return ymd(new Date());}          // 端末のローカル日付
+function toDate(s){return new Date(s+'T00:00');}   // 文字列→ローカル0時
+function shiftDate(s,n){const d=toDate(s);d.setDate(d.getDate()+n);return ymd(d);}
+function daysAgo(s){return Math.round((toDate(today())-toDate(s))/864e5);}
+function fmtDate(s){const d=toDate(s);return `${d.getMonth()+1}/${d.getDate()}`;}
+function fmtDateDow(s){return `${fmtDate(s)}(${DOW[toDate(s).getDay()]})`;}
+function relLabel(s){const n=daysAgo(s);
+  return n===0?'今日':n===1?'昨日':n===2?'おととい':n>0?`${n}日前`:`${-n}日後`;}
+function isTrainDay(s){return TRAIN_DAYS.includes(toDate(s).getDay());}
 function e1rm(w,r){return r<=1?w:w*(1+r/30);}          // Epley
 function mmss(sec){return `${Math.floor(sec/60)}:${pad(Math.round(sec%60))}`;}
 function parseMMSS(v){const m=String(v).match(/^(\d+)[:分]?(\d{1,2})$/);
@@ -173,6 +195,99 @@ function weekAvg(offsetDays){
   const v=DB.body.filter(b=>{const d=new Date(b.date);return d>=start&&d<=end&&b.weight}).map(b=>+b.weight);
   return v.length?{avg:avg(v),n:v.length}:null;
 }
+
+/* ============ 食材データベース ============ */
+let FOODS=[], foodsState='loading';   // loading | ready | error
+let fq='', fsel=null, tray=[];
+fetch('foods.json').then(r=>r.ok?r.json():Promise.reject())
+  .then(d=>{FOODS=d;FOODS.forEach((f,i)=>f.i=i);foodsState='ready';
+    if(TAB==='meal')renderFoodPanel();})
+  .catch(()=>{foodsState='error';if(TAB==='meal')renderFoodPanel();});
+
+// Python側 norm_name と同じ正規化（全角→半角、記号除去、カタカナ→ひらがな）
+function normKey(s){
+  s=String(s).normalize('NFKC').replace(/[\[\]［］（）()〈〉<>／/,、\s・"']/g,'');
+  s=s.replace(/[ァ-ヶ]/g,c=>String.fromCharCode(c.charCodeAt(0)-0x60));
+  return s.toLowerCase();
+}
+function useCount(f){return DB.foodUse[f.id]||0;}
+function searchFoods(q){
+  const k=normKey(q); if(!k)return [];
+  const hit=FOODS.filter(f=>f.s.includes(k));
+  // よく使う食材を上に、次に名前が短い（=基本形）ものを上に
+  return hit.sort((a,b)=>(useCount(b)-useCount(a))||(a.n.length-b.n.length)).slice(0,40);
+}
+/* 食材ごとの「よく使う量」ボタン */
+function gramPresets(n){
+  const has=(...w)=>w.some(x=>n.includes(x));
+  if(has('めし','ごはん'))          return [150,180,220,250];
+  if(has('鶏卵','卵'))              return [[50,'1個'],[100,'2個'],[150,'3個']];
+  if(has('納豆'))                   return [[45,'1P'],[90,'2P']];
+  if(has('食パン'))                 return [[60,'1枚'],[120,'2枚']];
+  if(has('バナナ'))                 return [[100,'1本'],[200,'2本']];
+  if(has('油','オリーブ','ごま油','バター')) return [[4,'小さじ1'],[12,'大さじ1']];
+  if(has('豆腐'))                   return [[150,'1/2丁'],[300,'1丁']];
+  if(has('ヨーグルト','牛乳','豆乳')) return [100,150,200];
+  if(has('プロテイン','ホエイ'))      return [[30,'1杯'],[60,'2杯']];
+  return [50,100,150,200];
+}
+/* 食材を選んだ直後に入っている既定の量（一番ありがちな一食分） */
+function defGram(n){
+  const has=(...w)=>w.some(x=>n.includes(x));
+  if(has('めし','ごはん'))                   return 180;
+  if(has('油','オリーブ','ごま油','バター'))    return 4;
+  if(has('納豆'))                            return 45;
+  if(has('食パン'))                          return 60;
+  if(has('プロテイン','ホエイ'))               return 30;
+  if(has('豆腐','ヨーグルト','牛乳','豆乳'))    return 150;
+  return 100;   // 肉・魚・野菜・果物など
+}
+function calcFood(f,g){g=+g||0;return {
+  kcal:Math.round(f.k*g/100), p:+(f.p*g/100).toFixed(1),
+  f:+(f.f*g/100).toFixed(1),  c:+(f.c*g/100).toFixed(1)};}
+
+/* ============ 記録日の管理 ============ */
+// 深夜0〜4時は「前日の続き」として扱う（体重は朝測るので誤記録を防ぐ）
+const LATE_NIGHT = new Date().getHours() < 4;
+const DATES = {}, DEDIT = {};
+function initDates(){
+  const t=today();
+  DATES.body  = LATE_NIGHT ? shiftDate(t,-1) : t;   // 体組成：深夜なら前日
+  DATES.train = LATE_NIGHT ? shiftDate(t,-1) : t;   // トレ：深夜なら前日
+  DATES.meal  = LATE_NIGHT ? shiftDate(t,-1) : t;   // 食事：深夜なら前日
+  DATES.sleep = t;                                  // 睡眠：起床日基準なので常に今日
+}
+initDates();
+function setDate(k,v){DATES[k]=v;DEDIT[k]=false;render();}
+function hasRec(k,d){
+  if(k==='body') return DB.body.some(x=>x.date===d);
+  if(k==='sleep')return DB.sleep.some(x=>x.date===d);
+  if(k==='meal') return DB.meals.some(x=>x.date===d);
+  if(k==='train')return DB.workouts.some(x=>x.date===d&&x.exercise===curEx);
+  return false;
+}
+/* 「今日 / 昨日 / おととい」＋必要時だけカレンダー */
+function dateBar(k,note){
+  const t=today(), v=DATES[k];
+  const quick=[0,-1,-2].map(n=>shiftDate(t,n));
+  const pills=quick.map((d,i)=>
+    `<span class="pill ${v===d?'on':''}" onclick="setDate('${k}','${d}')">${['今日','昨日','おととい'][i]}</span>`
+  ).join('');
+  const other=!quick.includes(v);
+  return `<div class="datebar">
+    <div class="row sb" style="align-items:center;gap:8px">
+      <div style="flex:1;min-width:0">${pills}${other?`<span class="pill on">${fmtDateDow(v)}</span>`:''}</div>
+      <button class="btn-s" style="flex-shrink:0" onclick="DEDIT['${k}']=!DEDIT['${k}'];render()">
+        ${DEDIT[k]?'閉じる':'他の日'}</button>
+    </div>
+    ${DEDIT[k]?`<input type="date" style="margin-top:9px" value="${v}" max="${t}"
+        onchange="setDate('${k}',this.value)">`:''}
+    <div class="hint">記録日 <b>${fmtDateDow(v)}・${relLabel(v)}</b>${
+      hasRec(k,v)?' <span class="tag warn" style="margin-left:4px">既に記録あり（上書き）</span>':''}${
+      note?'<br>'+note:''}</div>
+  </div>`;
+}
+const LN_NOTE = LATE_NIGHT ? '深夜のため前日を初期選択しています' : '';
 
 /* ============ 画面 ============ */
 let TAB='home';
@@ -195,6 +310,7 @@ function render(){
     ({home:vHome,train:vTrain,body:vBody,meal:vMeal,sleep:vSleep}[TAB])();
   // グラフ描画の失敗が記録機能を巻き込まないよう隔離
   try{ if(TAB==='body')drawBody(); if(TAB==='home')drawMini(); }catch(e){}
+  if(TAB==='meal')renderFoodPanel();
 }
 
 /* ---------- ホーム ---------- */
@@ -373,6 +489,7 @@ function vTrain(){
       </div>`).join('')}
     </div>
     <div class="hint">懸垂は kg 欄を空欄（自重）または加重量を入力</div>
+    ${dateBar('train',LN_NOTE)}
     <button class="btn-p full" style="margin-top:12px" onclick="saveWorkout()">保存</button>
   </div>
 
@@ -393,7 +510,8 @@ function addSet(){curSets.push({w:'',r:''});render();}
 function saveWorkout(){
   const sets=curSets.filter(s=>s.w||s.r);
   if(!sets.length){toast('入力してください');return;}
-  DB.workouts.push({date:today(),exercise:curEx,sets:sets.map(s=>({w:s.w,r:s.r}))});
+  DB.workouts.push({date:DATES.train,exercise:curEx,sets:sets.map(s=>({w:s.w,r:s.r}))});
+  DB.workouts.sort((a,b)=>a.date<b.date?-1:1);
   save();curSets=[{w:'',r:''},{w:'',r:''},{w:'',r:''}];render();toast('保存しました');
 }
 
@@ -410,7 +528,7 @@ function vBody(){
       <div><label>体重 (kg)</label><input type="number" inputmode="decimal" step="0.1" id="bw" placeholder="55.0"></div>
       <div><label>体脂肪率 (%)</label><input type="number" inputmode="decimal" step="0.1" id="bf" placeholder="20.0"></div>
     </div>
-    <div style="margin-top:10px"><label>日付</label><input type="date" id="bd" value="${today()}"></div>
+    ${dateBar('body',LN_NOTE)}
     <button class="btn-p full" style="margin-top:12px" onclick="saveBody()">保存</button>
   </div>
 
@@ -445,7 +563,7 @@ function vBody(){
 }
 function saveBody(){
   const w=document.getElementById('bw').value, f=document.getElementById('bf').value;
-  const d=document.getElementById('bd').value||today();
+  const d=DATES.body;
   if(!w&&!f){toast('入力してください');return;}
   const ex=DB.body.find(b=>b.date===d);
   if(ex){if(w)ex.weight=w;if(f)ex.bf=f;} else DB.body.push({date:d,weight:w,bf:f});
@@ -461,7 +579,7 @@ function saveRun(){
 
 /* ---------- 食事 ---------- */
 function vMeal(){
-  const t=today(), train=isTrainDay(t), tt=train?TARGET.train:TARGET.off;
+  const t=DATES.meal, train=isTrainDay(t), tt=train?TARGET.train:TARGET.off;
   const list=MEALS[train?'train':'off'];
   const md=DB.meals.filter(m=>m.date===t);
   const sum=md.reduce((a,m)=>({kcal:a.kcal+ +m.kcal,p:a.p+ +m.p,f:a.f+ +m.f,c:a.c+ +m.c}),{kcal:0,p:0,f:0,c:0});
@@ -469,7 +587,9 @@ function vMeal(){
 
   return `
   <h1>食事</h1>
-  <p class="sub">${train?'トレ日':'オフ日'}の目標 ${tt.kcal}kcal ／ P${tt.p} F${tt.f} C${tt.c}</p>
+  <p class="sub">${fmtDateDow(t)}・${train?'トレ日':'オフ日'}の目標 ${tt.kcal}kcal ／ P${tt.p} F${tt.f} C${tt.c}</p>
+
+  <div class="card" style="padding-top:4px">${dateBar('meal',LN_NOTE)}</div>
 
   <div class="card">
     <div class="row sb"><span class="big">${Math.round(sum.kcal)}<span class="unit">/ ${tt.kcal}kcal</span></span>
@@ -484,7 +604,42 @@ function vMeal(){
     </div>
   </div>
 
-  <h2>ワンタップ記録</h2>
+  <h2>食材から記録</h2>
+  <div class="card">
+    <input id="fq" value="${esc(fq)}" placeholder="食材名で検索（例: にわとり／こめ／たまご）"
+      autocomplete="off" enterkeyhint="search">
+    <div id="fres"></div>
+  </div>
+
+  ${tray.length?`
+  <h2>まとめ中（${tray.length}品）</h2>
+  <div class="card">
+    ${tray.map((x,i)=>`<div class="row sb" style="padding:7px 0;border-bottom:1px solid var(--line)">
+      <div style="flex:1;min-width:0"><div style="font-size:13px">${esc(x.n)} <b>${x.g}g</b></div>
+      <div class="fmeta">${x.kcal}kcal ・ P${x.p} F${x.f} C${x.c}</div></div>
+      <button class="btn-s btn-d" onclick="tray.splice(${i},1);render()">×</button></div>`).join('')}
+    <div class="fcalc" style="margin-top:10px">合計 ${fcalcHTML(trayTotal())}</div>
+    <input id="cn" placeholder="料理名（マイ料理として保存する場合）" style="margin-top:10px">
+    <div class="grid2" style="margin-top:10px">
+      <button class="btn-p" onclick="trayRecord()">まとめて記録</button>
+      <button onclick="trayCombo()">マイ料理に保存</button>
+    </div>
+  </div>`:''}
+
+  ${DB.combos.length?`
+  <h2>マイ料理</h2>
+  <div class="card">
+    ${DB.combos.map((c,i)=>{
+      const t=c.items.reduce((a,x)=>({kcal:a.kcal+x.kcal,p:a.p+x.p,f:a.f+x.f,c:a.c+x.c}),{kcal:0,p:0,f:0,c:0});
+      return `<div class="row sb" style="padding:8px 0;border-bottom:1px solid var(--line)">
+        <div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600">${esc(c.name)}</div>
+        <div class="fmeta">${Math.round(t.kcal)}kcal ・ P${t.p.toFixed(0)} F${t.f.toFixed(0)} C${t.c.toFixed(0)}
+          ・${c.items.length}品</div></div>
+        <button class="btn-s btn-p" onclick="comboAdd(${i})">追加</button>
+        <button class="btn-s btn-d" onclick="comboDel(${i})">×</button></div>`;}).join('')}
+  </div>`:''}
+
+  <h2>献立プリセット</h2>
   <div class="card">
     ${list.map((m,i)=>`<div class="row sb" style="padding:9px 0;border-bottom:1px solid var(--line)">
       <div style="flex:1;min-width:0">
@@ -507,7 +662,7 @@ function vMeal(){
     <button class="btn-p full" style="margin-top:12px" onclick="addManual()">追加</button>
   </div>
 
-  <h2>今日の記録</h2>
+  <h2>${relLabel(t)}の記録</h2>
   <div class="card">
     ${md.length?md.map(m=>{const id=DB.meals.indexOf(m);
       return `<div class="row sb" style="padding:8px 0;border-bottom:1px solid var(--line)">
@@ -517,16 +672,128 @@ function vMeal(){
       :'<div class="empty">まだ記録がありません</div>'}
   </div>`;
 }
+/* ---------- 食材検索パネル ---------- */
+// 検索欄はレンダリングのたびに作り直されるので、リスナーもそのたびに張り直す
+function bindSearchInput(){
+  const el=document.getElementById('fq'); if(!el||el._bound)return;
+  el._bound=true;
+  el.addEventListener('input',e=>{fq=e.target.value;fsel=null;renderFoodPanel();});
+}
+function bindGramInput(){
+  const el=document.getElementById('fg'); if(!el)return;
+  // 入力中は #fcalc だけ書き換える（再描画するとフォーカスとIMEが飛ぶ）
+  el.addEventListener('input',e=>{
+    if(!fsel)return; fsel._g=e.target.value;
+    const c=document.getElementById('fcalc');
+    if(c)c.innerHTML=fcalcHTML(calcFood(fsel,e.target.value));
+  });
+}
+function renderFoodPanel(){
+  bindSearchInput();
+  const el=document.getElementById('fres'); if(!el)return;
+  if(foodsState==='loading'){el.innerHTML='<div class="empty">食材データを読み込み中…</div>';return;}
+  if(foodsState==='error'){
+    el.innerHTML=`<div class="hint">食材データ（foods.json）が見つかりません。
+      下の「手動入力」またはプリセットをお使いください。</div>`;return;}
+  if(fsel){el.innerHTML=foodDetail(fsel);bindGramInput();return;}
+  const q=fq.trim();
+  if(!q){
+    const fav=FOODS.filter(f=>useCount(f)>0).sort((a,b)=>useCount(b)-useCount(a)).slice(0,8);
+    el.innerHTML = fav.length
+      ? `<label style="margin-top:12px">よく使う食材</label>`+fav.map(foodRow).join('')
+      : `<div class="hint">食材名を入力してください。「とりむね」「こめ」「たまご」のように
+         ひらがな・カタカナどちらでも探せます（${FOODS.length}件収録）。</div>`;
+    return;
+  }
+  const r=searchFoods(q);
+  el.innerHTML = r.length
+    ? `<label style="margin-top:12px">${r.length}件${r.length>=40?'以上':''}</label>`+r.map(foodRow).join('')
+    : `<div class="empty">「${esc(q)}」に該当なし</div>`;
+}
+function foodRow(f){
+  return `<div class="frow" onclick="pickFood(${f.i})">
+    <div style="flex:1;min-width:0">
+      <div class="fname">${esc(f.n)}</div>
+      <div class="fmeta">${f.k}kcal ・ P${f.p} F${f.f} C${f.c} <span style="opacity:.6">/100g</span></div>
+    </div><span class="farrow">›</span></div>`;
+}
+function foodDetail(f){
+  const pre=gramPresets(f.n);
+  const g=f._g||100, v=calcFood(f,g);
+  return `
+  <div class="row sb" style="margin:12px 0 8px">
+    <div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:700">${esc(f.n)}</div>
+      <div class="fmeta">${f.k}kcal ・ P${f.p} F${f.f} C${f.c} /100g</div></div>
+    <button class="btn-s" onclick="fsel=null;renderFoodPanel()">戻る</button>
+  </div>
+  <div style="margin-bottom:8px">${pre.map(x=>{
+    const gr=Array.isArray(x)?x[0]:x, lb=Array.isArray(x)?`${x[1]} ${x[0]}g`:`${x}g`;
+    return `<span class="pill ${g==gr?'on':''}" onclick="setGram(${gr})">${lb}</span>`;}).join('')}</div>
+  <div class="row" style="gap:8px">
+    <input type="number" inputmode="decimal" id="fg" value="${g}" style="flex:1" placeholder="g">
+    <span style="font-size:13px;color:var(--dim)">g</span>
+  </div>
+  <div class="fcalc" id="fcalc">${fcalcHTML(v)}</div>
+  <div class="grid2" style="margin-top:10px">
+    <button class="btn-p" onclick="addFood()">記録に追加</button>
+    <button onclick="trayAdd()">まとめる</button>
+  </div>`;
+}
+function fcalcHTML(v){
+  return `<b>${v.kcal}</b><span class="unit">kcal</span>
+    <span style="margin-left:10px">P<b>${v.p}</b> F<b>${v.f}</b> C<b>${v.c}</b></span>`;
+}
+function pickFood(i){fsel=FOODS[i];fsel._g=defGram(fsel.n);renderFoodPanel();}
+function setGram(g){fsel._g=g;renderFoodPanel();}
+function addFood(){
+  const g=+fsel._g||0; if(!g){toast('量を入力してください');return;}
+  const v=calcFood(fsel,g);
+  DB.meals.push({date:DATES.meal,n:`${fsel.n} ${g}g`,...v,fid:fsel.id});
+  DB.foodUse[fsel.id]=(DB.foodUse[fsel.id]||0)+1;
+  fsel=null;fq='';save();render();toast('追加しました');
+}
+/* ---------- マイ料理（複数食材をまとめる） ---------- */
+function trayAdd(){
+  const g=+fsel._g||0; if(!g){toast('量を入力してください');return;}
+  tray.push({id:fsel.id,n:fsel.n,g,...calcFood(fsel,g)});
+  DB.foodUse[fsel.id]=(DB.foodUse[fsel.id]||0)+1;
+  fsel=null;fq='';save();render();toast('まとめに追加');
+}
+function trayTotal(){return tray.reduce((a,x)=>({kcal:a.kcal+x.kcal,p:+(a.p+x.p).toFixed(1),
+  f:+(a.f+x.f).toFixed(1),c:+(a.c+x.c).toFixed(1)}),{kcal:0,p:0,f:0,c:0});}
+function trayRecord(){
+  if(!tray.length)return;
+  const t=trayTotal(), nm=(document.getElementById('cn')||{}).value;
+  DB.meals.push({date:DATES.meal,n:nm||tray.map(x=>`${x.n.split(' ')[0]}${x.g}g`).join('+'),...t});
+  tray=[];save();render();toast('記録しました');
+}
+function trayCombo(){
+  const nm=(document.getElementById('cn')||{}).value;
+  if(!nm){toast('料理名を入力してください');return;}
+  if(!tray.length)return;
+  DB.combos.push({name:nm,items:tray.slice()});
+  tray=[];save();render();toast(`「${nm}」を保存しました`);
+}
+function comboAdd(i){
+  const c=DB.combos[i];
+  const t=c.items.reduce((a,x)=>({kcal:a.kcal+x.kcal,p:+(a.p+x.p).toFixed(1),
+    f:+(a.f+x.f).toFixed(1),c:+(a.c+x.c).toFixed(1)}),{kcal:0,p:0,f:0,c:0});
+  DB.meals.push({date:DATES.meal,n:c.name,...t});
+  save();render();toast('追加しました');
+}
+function comboDel(i){if(!confirm(`「${DB.combos[i].name}」を削除しますか？`))return;
+  DB.combos.splice(i,1);save();render();}
+
 function addMeal(i,train){
   const m=MEALS[train?'train':'off'][i];
-  DB.meals.push({date:today(),...m});save();render();toast('追加しました');
+  DB.meals.push({date:DATES.meal,...m});save();render();toast('追加しました');
 }
 function addManual(){
   const n=document.getElementById('mn').value||'手動入力';
   const g=id=>+document.getElementById(id).value||0;
   const kcal=g('mk'),p=g('mp'),f=g('mf'),c=g('mc');
   if(!kcal&&!p&&!f&&!c){toast('入力してください');return;}
-  DB.meals.push({date:today(),n,kcal,p,f,c});save();render();toast('追加しました');
+  DB.meals.push({date:DATES.meal,n,kcal,p,f,c});save();render();toast('追加しました');
 }
 
 /* ---------- 睡眠 ---------- */
@@ -549,7 +816,7 @@ function vSleep(){
       <div><label>就寝</label><input type="time" id="sb" value="23:30"></div>
       <div><label>起床</label><input type="time" id="sw" value="07:00"></div>
     </div>
-    <div style="margin-top:10px"><label>日付（起床日）</label><input type="date" id="sd" value="${today()}"></div>
+    ${dateBar('sleep','起床した日を選んでください')}
     <button class="btn-p full" style="margin-top:12px" onclick="saveSleep()">保存</button>
     <div class="hint">起床後すぐ屋外光を10分／カフェインは就寝8時間前まで（14時以降カット）</div>
   </div>
@@ -566,7 +833,7 @@ function vSleep(){
 }
 function saveSleep(){
   const b=document.getElementById('sb').value,w=document.getElementById('sw').value;
-  const d=document.getElementById('sd').value||today();
+  const d=DATES.sleep;
   if(!b||!w){toast('入力してください');return;}
   const [bh,bm]=b.split(':').map(Number),[wh,wm]=w.split(':').map(Number);
   let h=(wh*60+wm)-(bh*60+bm); if(h<=0)h+=1440; h/=60;
@@ -593,7 +860,7 @@ function importJSON(el){
     const d=JSON.parse(r.result);
     if(!d.workouts&&!d.body)throw 0;
     if(!confirm('現在のデータを上書きします。よろしいですか？'))return;
-    DB={workouts:d.workouts||[],body:d.body||[],meals:d.meals||[],sleep:d.sleep||[],runs:d.runs||[]};
+    DB=Object.assign(JSON.parse(JSON.stringify(EMPTY)),d);
     save();render();toast('インポートしました');
   }catch(e){alert('読み込めませんでした');}};
   r.readAsText(f);el.value='';
